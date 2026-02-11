@@ -14,7 +14,7 @@ ALCHEMY_API_KEY = os.getenv('ALCHEMY_API_KEY')
 ALCHEMY_URL = f"https://megaeth-mainnet.g.alchemy.com/v2/{ALCHEMY_API_KEY}"
 
 # Contract Address
-CONTRACT_ADDRESS = "0x..." # <--- PASTE YOUR 0x ADDRESS HERE
+CONTRACT_ADDRESS = "0x3fd43a658915a7ce5ae0a2e48f72b9fce7ba0c44" # <--- PASTE YOUR 0x ADDRESS HERE
 try:
     CONTRACT_ADDRESS = Web3.to_checksum_address(CONTRACT_ADDRESS)
 except:
