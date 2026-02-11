@@ -27,4 +27,7 @@ jobs:
           DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
           ALCHEMY_API_KEY: ${{ secrets.ALCHEMY_API_KEY }}
-        run: python bot.py
+	  run: |
+          pip install discord.py requests web3
+          python bot.py
+        
