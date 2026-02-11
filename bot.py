@@ -2,79 +2,85 @@ import discord
 import requests
 import os
 import asyncio
-import random
 from datetime import datetime
 
 # --- CONFIGURATION ---
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 CHANNEL_ID = int(os.getenv('CHANNEL_ID'))
+ALCHEMY_API_KEY = os.getenv('ALCHEMY_API_KEY')
 
-# The slug from the URL: opensea.io/collection/world-computer-netizens-megaeth
-COLLECTION_SLUG = "world-computer-netizens-megaeth"
+# The Contract Address for "World Computer Netizens"
+CONTRACT_ADDRESS = "0x3fd43a658915a7ce5ae0a2e48f72b9fce7ba0c44" # <--- PASTE YOUR 0x ADDRESS HERE
 
-# List of "Human" User-Agents to trick OpenSea
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36"
-]
+# ALCHEMY NETWORK SETTING
+# If Alchemy supports MegaETH, you must find the exact subdomain in your dashboard.
+# Common formats: 'eth-mainnet', 'polygon-mainnet', 'arb-mainnet', 'opt-mainnet'
+# For MegaETH, it might be 'megaeth-mainnet' or similar. Check your Alchemy App Dashboard.
+ALCHEMY_NETWORK = "megaeth-mainnet" 
+
+# Alchemy NFT V3 Endpoint
+URL = f"https://{ALCHEMY_NETWORK}.g.alchemy.com/nft/v3/{ALCHEMY_API_KEY}/getFloorPrice"
 
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 
-async def get_opensea_stats():
-    # Attempt 1: The V2 Stats Endpoint
-    url = f"https://api.opensea.io/api/v2/collections/{COLLECTION_SLUG}/stats"
-    
+async def get_floor_price():
+    params = {
+        "contractAddress": CONTRACT_ADDRESS
+    }
     headers = {
-        "User-Agent": random.choice(USER_AGENTS),
-        "Accept": "application/json"
+        "accept": "application/json"
     }
     
-    print(f"DEBUG: Hail Mary attempt on {url}")
+    print(f"DEBUG: asking Alchemy ({ALCHEMY_NETWORK})...")
     
     try:
-        response = requests.get(url, headers=headers)
+        response = requests.get(URL, params=params, headers=headers)
         
-        # DEBUG: Print the status to see if we got blocked
-        print(f"DEBUG: Status Code: {response.status_code}")
+        # DEBUG: Print response if it fails
+        if response.status_code != 200:
+            print(f"ERROR: Alchemy returned {response.status_code}")
+            print(f"Response: {response.text}")
+            return None
+            
+        data = response.json()
         
-        if response.status_code == 200:
-            data = response.json()
-            # OpenSea V2 structure: { total: { floor_price: 1.2, ... } }
-            floor = data.get('total', {}).get('floor_price')
-            if floor:
-                return floor
-        elif response.status_code == 403:
-            print("DEBUG: GitHub IP was blocked by OpenSea (403).")
-        else:
-            print(f"DEBUG: Response Text: {response.text}")
+        # Alchemy V3 Response Structure
+        # It usually returns data for OpenSea and LooksRare. We prioritize OpenSea.
+        opensea_data = data.get("openSea", {})
+        floor = opensea_data.get("floorPrice")
+        
+        # Fallback if OpenSea is empty
+        if not floor:
+            looksrare_data = data.get("looksRare", {})
+            floor = looksrare_data.get("floorPrice")
+            
+        return floor
 
     except Exception as e:
         print(f"CRITICAL ERROR: {e}")
-        
-    return None
+        return None
 
 @client.event
 async def on_ready():
     print(f'Logged in as {client.user}')
     
-    price = await get_opensea_stats()
+    price = await get_floor_price()
     
     if price:
         channel = client.get_channel(CHANNEL_ID)
         if channel:
-            embed = discord.Embed(title="💎 Floor Price Update", url=f"https://opensea.io/collection/{COLLECTION_SLUG}", color=0x2081E2)
+            embed = discord.Embed(title="💎 Floor Price Update", color=0x00FFFF)
             embed.add_field(name="Collection", value="World Computer Netizens", inline=True)
             embed.add_field(name="Floor Price", value=f"**{price} ETH**", inline=True)
-            embed.set_footer(text=f"Updated: {datetime.now().strftime('%H:%M')} via OpenSea")
+            embed.set_footer(text=f"Updated: {datetime.now().strftime('%H:%M')} via Alchemy")
             
             await channel.send(embed=embed)
             print(f"SUCCESS: Posted price: {price}")
         else:
             print(f"ERROR: Channel {CHANNEL_ID} not found.")
     else:
-        print("ERROR: Could not fetch price. OpenSea might have blocked the GitHub server.")
+        print("ERROR: Alchemy returned no floor price data.")
     
     await client.close()
 
