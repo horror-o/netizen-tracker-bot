@@ -1,3 +1,10 @@
+name: Track NFT Floor
+
+on:
+  schedule:
+    - cron: '0 */2 * * *'  # Runs every 2 hours
+  workflow_dispatch:      # Allows you to click "Run workflow" manually
+
 jobs:
   run-bot:
     runs-on: ubuntu-latest
@@ -10,11 +17,14 @@ jobs:
         with:
           python-version: '3.9'
 
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install discord.py requests web3
+
       - name: Run Bot
         env:
           DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
           ALCHEMY_API_KEY: ${{ secrets.ALCHEMY_API_KEY }}
-        run: |
-          pip install discord.py requests web3
-          python bot.py
+        run: python bot.py
