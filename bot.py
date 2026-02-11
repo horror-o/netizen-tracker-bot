@@ -13,8 +13,8 @@ ALCHEMY_API_KEY = os.getenv('ALCHEMY_API_KEY')
 # MegaETH RPC URL
 ALCHEMY_URL = f"https://megaeth-mainnet.g.alchemy.com/v2/{ALCHEMY_API_KEY}"
 
-# Contract Address (Ensure checksum format)
-CONTRACT_ADDRESS = "0x3fd43a658915a7ce5ae0a2e48f72b9fce7ba0c44" # <--- PASTE YOUR 0x ADDRESS HERE
+# Contract Address
+CONTRACT_ADDRESS = "0x..." # <--- PASTE YOUR 0x ADDRESS HERE
 try:
     CONTRACT_ADDRESS = Web3.to_checksum_address(CONTRACT_ADDRESS)
 except:
@@ -38,68 +38,82 @@ def get_smart_floor():
 
     try:
         latest_block = w3.eth.block_number
-        # MegaETH is fast. 5000 blocks is roughly 1-2 hours.
-        from_block = latest_block - 5000 
         
-        print(f"DEBUG: Scanning blocks {from_block} to {latest_block}")
+        # WE WANT 2 HOURS OF DATA (~72,000 Blocks on MegaETH)
+        # But Alchemy limits us to ~2,000 blocks per request.
+        TOTAL_BLOCKS_TO_SCAN = 70000 
+        CHUNK_SIZE = 2000
+        
+        start_block = latest_block - TOTAL_BLOCKS_TO_SCAN
+        print(f"DEBUG: Plan: Scan from {start_block} to {latest_block} in chunks of {CHUNK_SIZE}")
 
-        logs = w3.eth.get_logs({
-            'fromBlock': from_block,
-            'toBlock': latest_block,
-            'address': CONTRACT_ADDRESS,
-            'topics': [TRANSFER_TOPIC]
-        })
+        all_logs = []
         
-        print(f"DEBUG: Found {len(logs)} transfers. Analyzing values...")
+        # --- THE CHUNKING LOOP ---
+        current_from = start_block
+        while current_from < latest_block:
+            current_to = min(current_from + CHUNK_SIZE, latest_block)
+            
+            try:
+                # Ask for just a small slice
+                logs = w3.eth.get_logs({
+                    'fromBlock': current_from,
+                    'toBlock': current_to,
+                    'address': CONTRACT_ADDRESS,
+                    'topics': [TRANSFER_TOPIC]
+                })
+                all_logs.extend(logs)
+                # print(f"DEBUG: Scanned {current_from}-{current_to} -> Found {len(logs)} logs")
+            except Exception as e:
+                print(f"WARN: Failed chunk {current_from}-{current_to}: {e}")
+            
+            current_from = current_to + 1
+            
+        print(f"DEBUG: Total transfers found: {len(all_logs)}")
         
+        if not all_logs:
+            print("DEBUG: No transfers found in the last 2 hours.")
+            return None
+
+        # --- ANALYZE THE LOGS ---
         raw_sales = []
         
-        # Limit to checking the last 50 logs to save API credits/time
-        recent_logs = logs[-50:] 
-        
-        for log in recent_logs:
+        # Only check the last 50 transfers to save time, 
+        # but now we are choosing from a much larger pool of history.
+        for log in all_logs[-50:]: 
             tx_hash = log['transactionHash']
             try:
                 tx = w3.eth.get_transaction(tx_hash)
                 value_eth = float(w3.from_wei(tx['value'], 'ether'))
                 
-                # Filter 1: Ignore junk (< 0.0001)
+                # Filter: Ignore junk (< 0.0001)
                 if value_eth > 0.0001: 
                     raw_sales.append(value_eth)
             except Exception as e:
-                print(f"Warn: Could not fetch tx {tx_hash.hex()}: {e}")
+                pass
 
         if not raw_sales:
-            print("DEBUG: No ETH sales found in scan range.")
+            print("DEBUG: Transfers found, but no ETH value attached (likely WETH sales).")
             return None
 
-        # --- SMART LOGIC START ---
-        
-        # 1. Sort low to high
+        # --- SMART MATH LOGIC ---
         raw_sales.sort()
-        print(f"DEBUG: Raw Sales Found: {raw_sales}")
+        print(f"DEBUG: Valid Sales: {raw_sales}")
         
-        # 2. The "30% Gap" Filter (Iterative)
-        # We loop and check if the first item is an outlier compared to the second
         cleaned_sales = raw_sales.copy()
         
+        # 30% Gap Filter
         while len(cleaned_sales) > 1:
             lowest = cleaned_sales[0]
             second_lowest = cleaned_sales[1]
-            
-            # If lowest is < 70% of the second lowest (30% gap)
             if lowest < (second_lowest * 0.70):
-                print(f"DEBUG: Removed Outlier {lowest} (Gap too big vs {second_lowest})")
-                cleaned_sales.pop(0) # Remove the outlier
+                cleaned_sales.pop(0) 
             else:
-                break # Gap is normal, stop filtering
+                break 
         
-        # 3. Take Average of Bottom 3
-        # If we have less than 3 sales, take average of what we have
+        # Average of Bottom 3
         final_sales_pool = cleaned_sales[:3]
         floor_estimate = mean(final_sales_pool)
-        
-        print(f"DEBUG: Final Pool: {final_sales_pool} -> Avg: {floor_estimate}")
         
         return floor_estimate
 
@@ -110,24 +124,18 @@ def get_smart_floor():
 @client.event
 async def on_ready():
     print(f'Logged in as {client.user}')
-    
     price = get_smart_floor()
-    
     if price:
         channel = client.get_channel(CHANNEL_ID)
         if channel:
-            embed = discord.Embed(title="💎 Floor Price Estimate (On-Chain)", color=0xFFAA00)
+            embed = discord.Embed(title="💎 Floor Price Estimate", color=0xFFAA00)
             embed.add_field(name="Collection", value="World Computer Netizens", inline=True)
             embed.add_field(name="Est. Floor Price", value=f"**{price:.4f} ETH**", inline=True)
-            embed.set_footer(text=f"Avg of lowest 3 recent sales (outliers removed)")
-            
+            embed.set_footer(text=f"Based on on-chain sales (last ~2 hours)")
             await channel.send(embed=embed)
             print(f"SUCCESS: Posted price: {price}")
-        else:
-            print(f"ERROR: Channel {CHANNEL_ID} not found.")
     else:
         print("ERROR: No valid sales found.")
-    
     await client.close()
 
 client.run(DISCORD_TOKEN)
