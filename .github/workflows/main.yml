@@ -2,8 +2,8 @@ name: Track NFT Floor
 
 on:
   schedule:
-    - cron: '0 */2 * * *'  # Runs every 2 hours
-  workflow_dispatch:      # Allows you to click "Run workflow" manually
+    - cron: '*/20 * * * *'
+  workflow_dispatch:     # Allows you to click "Run workflow" manually
 
 jobs:
   run-bot:
