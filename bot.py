@@ -1,7 +1,7 @@
 import discord
 import os
+import time
 import asyncio
-from datetime import datetime
 from web3 import Web3
 from statistics import mean
 
@@ -12,91 +12,89 @@ ALCHEMY_API_KEY = os.getenv('ALCHEMY_API_KEY')
 
 # MegaETH RPC URL
 ALCHEMY_URL = f"https://megaeth-mainnet.g.alchemy.com/v2/{ALCHEMY_API_KEY}"
-
 # Contract Address
-CONTRACT_ADDRESS = "0x3fd43a658915a7ce5ae0a2e48f72b9fce7ba0c44" # <--- PASTE YOUR 0x ADDRESS HERE
-try:
-    CONTRACT_ADDRESS = Web3.to_checksum_address(CONTRACT_ADDRESS)
-except:
-    print("CRITICAL: Invalid Contract Address format")
+CONTRACT_ADDRESS = "0x3fd43a658915a7ce5ae0a2e48f72b9fce7ba0c44" # <--- PASTE YOUR 0x ADDRESS HERE (Make sure it's the right one!)
 
 # Standard Transfer Event Signature
 TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 
-intents = discord.Intents.default()
-client = discord.Client(intents=intents)
+# --- SCANNING SETTINGS ---
+# MegaETH blocks are fast. 20,000 blocks is approx 30-45 minutes of history.
+TOTAL_BLOCKS_TO_SCAN = 20000 
+CHUNK_SIZE = 250  # drastic reduction to fix 400 errors
 
-# Connect to Blockchain
 w3 = Web3(Web3.HTTPProvider(ALCHEMY_URL))
 
 def get_smart_floor():
-    print(f"DEBUG: Connecting to Blockchain via Alchemy...")
+    print(f"DEBUG: Connecting to Blockchain...")
     
     if not w3.is_connected():
         print("CRITICAL: Could not connect to RPC.")
         return None
 
     try:
+        # Check address validity
+        valid_address = Web3.to_checksum_address(CONTRACT_ADDRESS)
+        
         latest_block = w3.eth.block_number
-        
-        # WE WANT 2 HOURS OF DATA (~72,000 Blocks on MegaETH)
-        # But Alchemy limits us to ~2,000 blocks per request.
-        TOTAL_BLOCKS_TO_SCAN = 70000 
-        CHUNK_SIZE = 2000
-        
         start_block = latest_block - TOTAL_BLOCKS_TO_SCAN
-        print(f"DEBUG: Plan: Scan from {start_block} to {latest_block} in chunks of {CHUNK_SIZE}")
+        print(f"DEBUG: Scanning {TOTAL_BLOCKS_TO_SCAN} blocks ({start_block} to {latest_block})...")
 
         all_logs = []
         
-        # --- THE CHUNKING LOOP ---
+        # --- SAFE CHUNKING LOOP ---
         current_from = start_block
         while current_from < latest_block:
             current_to = min(current_from + CHUNK_SIZE, latest_block)
             
             try:
-                # Ask for just a small slice
                 logs = w3.eth.get_logs({
                     'fromBlock': current_from,
                     'toBlock': current_to,
-                    'address': CONTRACT_ADDRESS,
+                    'address': valid_address,
                     'topics': [TRANSFER_TOPIC]
                 })
-                all_logs.extend(logs)
-                # print(f"DEBUG: Scanned {current_from}-{current_to} -> Found {len(logs)} logs")
+                if logs:
+                    all_logs.extend(logs)
+                    print(f"DEBUG: Found {len(logs)} txs in blocks {current_from}-{current_to}")
             except Exception as e:
-                print(f"WARN: Failed chunk {current_from}-{current_to}: {e}")
+                # If 250 fails, we just skip that chunk and keep going
+                print(f"WARN: Chunk failed {current_from}-{current_to} (Likely RPC limit)")
             
+            # Tiny sleep to be polite to the API
+            time.sleep(0.05)
             current_from = current_to + 1
             
-        print(f"DEBUG: Total transfers found: {len(all_logs)}")
+        print(f"DEBUG: Total raw transfers found: {len(all_logs)}")
         
         if not all_logs:
-            print("DEBUG: No transfers found in the last 2 hours.")
             return None
 
-        # --- ANALYZE THE LOGS ---
+        # --- ANALYZE LOGS ---
         raw_sales = []
         
-        # Only check the last 50 transfers to save time, 
-        # but now we are choosing from a much larger pool of history.
-        for log in all_logs[-50:]: 
-            tx_hash = log['transactionHash']
+        for log in all_logs:
             try:
-                tx = w3.eth.get_transaction(tx_hash)
+                # We need the transaction value.
+                # Optimization: get_transaction is expensive. 
+                # We only check if we have < 50 logs. If we have 1000s, this will be slow.
+                if len(all_logs) > 100:
+                    # If tons of logs, skip checking all of them, just check the last 50
+                    if log not in all_logs[-50:]: continue
+
+                tx = w3.eth.get_transaction(log['transactionHash'])
                 value_eth = float(w3.from_wei(tx['value'], 'ether'))
                 
-                # Filter: Ignore junk (< 0.0001)
-                if value_eth > 0.0001: 
+                if value_eth > 0.001: 
                     raw_sales.append(value_eth)
-            except Exception as e:
-                pass
+            except:
+                continue
 
         if not raw_sales:
-            print("DEBUG: Transfers found, but no ETH value attached (likely WETH sales).")
+            print("DEBUG: Found transfers, but all were 0 ETH (likely Mints or WETH sales).")
             return None
 
-        # --- SMART MATH LOGIC ---
+        # --- SMART MATH ---
         raw_sales.sort()
         print(f"DEBUG: Valid Sales: {raw_sales}")
         
@@ -105,37 +103,50 @@ def get_smart_floor():
         # 30% Gap Filter
         while len(cleaned_sales) > 1:
             lowest = cleaned_sales[0]
-            second_lowest = cleaned_sales[1]
-            if lowest < (second_lowest * 0.70):
+            second = cleaned_sales[1]
+            if lowest < (second * 0.70):
                 cleaned_sales.pop(0) 
             else:
                 break 
         
         # Average of Bottom 3
-        final_sales_pool = cleaned_sales[:3]
-        floor_estimate = mean(final_sales_pool)
-        
-        return floor_estimate
+        final_pool = cleaned_sales[:3]
+        return mean(final_pool)
 
     except Exception as e:
         print(f"CRITICAL ERROR: {e}")
         return None
 
+# --- DISCORD BOT ---
+intents = discord.Intents.default()
+client = discord.Client(intents=intents)
+price_result = None # Global variable to store the result
+
 @client.event
 async def on_ready():
     print(f'Logged in as {client.user}')
-    price = get_smart_floor()
-    if price:
+    
+    if price_result:
         channel = client.get_channel(CHANNEL_ID)
         if channel:
             embed = discord.Embed(title="💎 Floor Price Estimate", color=0xFFAA00)
             embed.add_field(name="Collection", value="World Computer Netizens", inline=True)
-            embed.add_field(name="Est. Floor Price", value=f"**{price:.4f} ETH**", inline=True)
-            embed.set_footer(text=f"Based on on-chain sales (last ~2 hours)")
+            embed.add_field(name="Est. Floor Price", value=f"**{price_result:.4f} ETH**", inline=True)
+            embed.set_footer(text="Based on recent on-chain sales")
             await channel.send(embed=embed)
-            print(f"SUCCESS: Posted price: {price}")
+            print("SUCCESS: Posted to Discord.")
     else:
-        print("ERROR: No valid sales found.")
+        print("ERROR: No price to post.")
+    
     await client.close()
 
-client.run(DISCORD_TOKEN)
+# --- MAIN EXECUTION ---
+if __name__ == "__main__":
+    # 1. Run the heavy scan FIRST (No Discord connection yet)
+    price_result = get_smart_floor()
+    
+    # 2. Only run Discord if we found something
+    if price_result:
+        client.run(DISCORD_TOKEN)
+    else:
+        print("Done. No sales found, skipping Discord login.")
